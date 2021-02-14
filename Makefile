@@ -9,9 +9,9 @@
 #
 
 
-COMPILER         = -c++
+COMPILER         = -g++
 OPTIMIZATION_OPT = -O3
-OPTIONS          = -pedantic -ansi -Wall -Werror $(OPTIMIZATION_OPT) -o
+OPTIONS          = --std=c++11 -pedantic -Wall -Werror $(OPTIMIZATION_OPT) -o
 PTHREAD          = -lpthread
 LINKER_OPT       = -L/usr/lib -lstdc++ $(PTHREAD) -lboost_thread -lboost_system
 
