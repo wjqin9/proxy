@@ -15,15 +15,15 @@ OPTIONS          = --std=c++11 -pedantic -Wall -Werror $(OPTIMIZATION_OPT) -o
 PTHREAD          = -lpthread
 LINKER_OPT       = -L/usr/lib -lstdc++ $(PTHREAD) -lboost_thread -lboost_system
 
-BUILD_LIST+=tcpproxy_server
+BUILD_LIST+=httpproxy
 
 all: $(BUILD_LIST)
 
-tcpproxy_server: tcpproxy_server.cpp
-	$(COMPILER) $(OPTIONS) tcpproxy_server tcpproxy_server.cpp $(LINKER_OPT)
+httpproxy: httpproxy.cpp
+	$(COMPILER) $(OPTIONS) httpproxy httpproxy.cpp $(LINKER_OPT)
 
 strip_bin :
-	strip -s tcpproxy
+	strip -s httpproxy
 
 clean:
 	rm -f core *.o *.bak *~ *stackdump *#
