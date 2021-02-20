@@ -28,7 +28,6 @@
 #include <cstddef>
 #include <iostream>
 #include <string>
-#include <utility>
 
 #include <boost/shared_ptr.hpp>
 #include <boost/enable_shared_from_this.hpp>
@@ -52,11 +51,9 @@ namespace tcp_proxy
       : downstream_socket_(ios),
         upstream_socket_  (ios)
       {
-         //std::clog << "create brdige " << (count ++) << std::endl;
       }
       ~bridge()
       {
-         //std::clog << "destroy brdige " << (--count) << std::endl;
       }
 
       socket_type& downstream_socket()
@@ -72,27 +69,25 @@ namespace tcp_proxy
       }
       void read_request()
       {
-         //std::clog << "read_request" << std::endl;
-         downstream_socket_.async_read_some(boost::asio::buffer(downstream_data_, max_data_length), boost::bind(&bridge::handle_read, shared_from_this(), 
+         downstream_socket_.async_read_some(boost::asio::buffer(downstream_data_, max_data_length), boost::bind(&bridge::handle_read, shared_from_this(),
          boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred));
       }
 
       void handle_read(const boost::system::error_code& error, std::size_t bytes_transferred)
       {
-         //std::clog << "handle_read" << std::endl;
          if (!error && bytes_transferred > 0)
          {
             static const std::string header_end = "\r\n\r\n";
             int old_size = received_data_.size();
             received_data_.resize(received_data_.size() + bytes_transferred);
             std::copy(downstream_data_, downstream_data_ + bytes_transferred, received_data_.begin() + old_size);
-            //std::clog << "read_request\n" << received_data_ << std::endl;
             auto index = received_data_.find(header_end);
             if (index != std::string::npos)
             {
-               auto host_port = parse_header(received_data_);
-               //std::clog << host_port.first << ":" << host_port.second << std::endl;
-               start(host_port.first, host_port.second);
+               std::string headers = received_data_.substr(0, index+4);
+               std::string host, port;
+               std::tie(host, port, is_http_) = parse_header(headers);
+               start(host, port);
             }
             else
             {
@@ -105,62 +100,86 @@ namespace tcp_proxy
          }
       }
 
-      std::pair<const std::string, const std::string> parse_header(const std::string& header) const
+      std::tuple<const std::string, const std::string, bool> parse_header(const std::string& header) const
       {
       // CONNECT www.reddit.com:443 HTTP/1.1
       // Host: www.reddit.com:443
       // Proxy-Connection: keep-alive
       // User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.150 Safari/537.36
+
+      // GET http://google.com/ HTTP/1.1
+      // Host: google.com
+      // Proxy-Connection: keep-alive
+      // Upgrade-Insecure-Requests: 1
+      // User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.150 Safari/537.36
+      // Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9
+      // Accept-Encoding: gzip, deflate
+      // Accept-Language: en-US,en;q=0.9
+
          std::vector<std::string> headers;
          boost::split(headers, header, boost::is_any_of("\r\n"), boost::token_compress_on);
-         /*for (auto it : headers)
-         {
-            std::clog << it << "\n";
-         }
-         std::clog << std::endl;*/
          std::string host, port;
+         bool is_http = false;
          if (headers.size() > 0)
          {
             std::vector<std::string> splitvec;
             boost::split(splitvec, headers[0], boost::is_any_of(" "), boost::token_compress_on);
             if (splitvec.size() >= 3)
             {
+               if (splitvec[0] != "CONNECT")
+               {
+                  is_http = true;
+               }
+               std::string uri = splitvec[1];
+               if (uri.find("http://") == 0)
+               {
+                  uri.erase(0, 7);
+                  size_t pos = uri.find("/");
+                  if (pos != std::string::npos)
+                  {
+                     uri.erase(pos, uri.length() - pos);
+                  }
+               }
                std::vector<std::string> splitvec2;
-               boost::split(splitvec2, splitvec[1], boost::is_any_of(":"), boost::token_compress_on);
+               boost::split(splitvec2, uri, boost::is_any_of(":"), boost::token_compress_on);
                if (splitvec2.size() == 2) 
                {
-                  //std::clog << splitvec2[0] << " " << splitvec2[1] << std::endl;
                   host = splitvec2[0];
                   port = splitvec2[1];  
                }
+               else if (splitvec2.size() == 1)
+               {
+                  host = splitvec2[0];
+                  port = "80";               
+               }
             }
          }
-         return std::make_pair(host, port);
+         return std::make_tuple(host, port, is_http);
       }
 
       void response(unsigned status, const std::string& message)
       {
          std::string reply = std::string("HTTP/1.0 " ) + std::to_string(status) + " " + message + "\r\n";
          reply += "Proxy-agent: proxy\r\n\r\n";
-         //std::clog << "response from server\n" << reply << std::endl;
-         downstream_socket_.async_send(boost::asio::buffer(reply, reply.size()), boost::bind(&bridge::handle_send, shared_from_this(), 
+         downstream_socket_.async_send(boost::asio::buffer(reply, reply.size()), boost::bind(&bridge::handle_response_sent, shared_from_this(),
          boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred));
       }
 
-      void handle_send(const boost::system::error_code& error, std::size_t bytes_transferred)
+      void upstream_response()
       {
-         if (error)
+         if (received_data_.size() > 0)
          {
-            close();
+            upstream_socket_.async_send(boost::asio::buffer(received_data_, received_data_.size()), boost::bind(&bridge::handle_response_sent, shared_from_this(),
+            boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred));
+         }
+         else 
+         {
+            transact();
          }
       }
 
       void start(const std::string& upstream_host, const std::string& upstream_port)
       {
-         /*{
-            boost::mutex::scoped_lock lock(mutex_);
-            std::clog << "start " << upstream_host << " " << upstream_port << " " << (count++) << std::endl;
-         }*/
          // Attempt connection to remote server (upstream side)
          boost::asio::io_service io_service;
          boost::asio::ip::tcp::resolver resolver(io_service);
@@ -171,45 +190,51 @@ namespace tcp_proxy
                boost::bind(&bridge::handle_upstream_connect,
                     shared_from_this(),
                     boost::asio::placeholders::error));
-
-         // upstream_socket_.async_connect(
-         //      ip::tcp::endpoint(
-         //           boost::asio::ip::address::from_string(upstream_host),
-         //           upstream_port),
-         //       boost::bind(&bridge::handle_upstream_connect,
-         //            shared_from_this(),
-         //            boost::asio::placeholders::error));
-         //std::clog << "start" << std::endl;
       }
 
       void handle_upstream_connect(const boost::system::error_code& error)
       {
-         //response(unsigned status, const std::string& message);
-         //std::clog << "handle_upstream_connect" << std::endl;
          if (!error)
          {
-            response(200, "Connection established");
-            // Setup async read from remote server (upstream)
-            upstream_socket_.async_read_some(
-                 boost::asio::buffer(upstream_data_,max_data_length),
-                 boost::bind(&bridge::handle_upstream_read,
-                      shared_from_this(),
-                      boost::asio::placeholders::error,
-                      boost::asio::placeholders::bytes_transferred));
+            if (is_http_)
+            {
+               upstream_response();
+            }
+            else
+            {
+               response(200, "Connection established");
+            }
+         }
+      }
 
-            // Setup async read from client (downstream)
-            downstream_socket_.async_read_some(
-                 boost::asio::buffer(downstream_data_,max_data_length),
-                 boost::bind(&bridge::handle_downstream_read,
-                      shared_from_this(),
-                      boost::asio::placeholders::error,
-                      boost::asio::placeholders::bytes_transferred));
+      void transact() {
+         // Setup async read from remote server (upstream)
+         upstream_socket_.async_read_some(
+               boost::asio::buffer(upstream_data_,max_data_length),
+               boost::bind(&bridge::handle_upstream_read,
+                     shared_from_this(),
+                     boost::asio::placeholders::error,
+                     boost::asio::placeholders::bytes_transferred));
+
+         // Setup async read from client (downstream)
+         downstream_socket_.async_read_some(
+               boost::asio::buffer(downstream_data_,max_data_length),
+               boost::bind(&bridge::handle_downstream_read,
+                     shared_from_this(),
+                     boost::asio::placeholders::error,
+                     boost::asio::placeholders::bytes_transferred));
+
+      }
+
+      void handle_response_sent(const boost::system::error_code& error, size_t bytes_transferred) 
+      {
+         if (!error) {
+            transact();
          }
          else
          {
             response(404, "Connection failed");
             close();
-            //std::clog << "closed handle_upstream_connect" << std::endl;
          }
       }
 
@@ -235,7 +260,6 @@ namespace tcp_proxy
          else
          {
             close();
-            //std::clog << "closed handle_upstream_read" << std::endl;
          }
       }
 
@@ -254,7 +278,6 @@ namespace tcp_proxy
          else
          {
             close();
-            //std::clog << "closed" << std::endl;
          }
       }
       // *** End Of Section A ***
@@ -280,7 +303,6 @@ namespace tcp_proxy
          else
          {
             close();
-            //std::clog << "closed handle_downstream_read" << std::endl;
          }
       }
 
@@ -299,7 +321,6 @@ namespace tcp_proxy
          else
          {
             close();
-            //std::clog << "closed" << std::endl;
          }
       }
       // *** End Of Section B ***
@@ -307,8 +328,6 @@ namespace tcp_proxy
       void close()
       {
          boost::mutex::scoped_lock lock(mutex_);
-         // count--;
-         // std::clog << "close " << count << std::endl;
          if (downstream_socket_.is_open())
          {
             downstream_socket_.close();
@@ -330,6 +349,7 @@ namespace tcp_proxy
 
       boost::mutex mutex_;
 
+      bool is_http_ = false;
 
    public:
 
@@ -370,7 +390,6 @@ namespace tcp_proxy
          {
             if (!error)
             {
-               //session_->start(upstream_host_,upstream_port_);
                session_->read_request();
 
                if (!accept_connections())
@@ -402,9 +421,7 @@ int main(int argc, char* argv[])
    }
 
    const unsigned short local_port   = static_cast<unsigned short>(::atoi(argv[2]));
-   //const unsigned short forward_port = static_cast<unsigned short>(::atoi(argv[4]));
    const std::string local_host      = argv[1];
-   //const std::string forward_host    = argv[3];
 
    boost::asio::io_service ios;
 
@@ -425,8 +442,3 @@ int main(int argc, char* argv[])
 
    return 0;
 }
-
-/*
- * [Note] On posix systems the tcp proxy server build command is as follows:
- * c++ -pedantic -ansi -Wall -Werror -O3 -o tcpproxy_server tcpproxy_server.cpp -L/usr/lib -lstdc++ -lpthread -lboost_thread -lboost_system
- */
